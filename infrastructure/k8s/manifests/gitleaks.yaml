@@ -1,0 +1,41 @@
+# Gitleaks - Secret scanning tool (runs as CronJob)
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: gitleaks-scanner
+  namespace: security
+spec:
+  schedule: "0 */6 * * *"   # every 6 hours
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: gitleaks
+              image: zricethezav/gitleaks:latest
+              args:
+                - detect
+                - --source=/scan
+                - --report-format=json
+                - --report-path=/reports/gitleaks-report.json
+                - --no-git
+              volumeMounts:
+                - name: scan-target
+                  mountPath: /scan
+                  readOnly: true
+                - name: reports
+                  mountPath: /reports
+              resources:
+                requests:
+                  memory: 128Mi
+                  cpu: 100m
+                limits:
+                  memory: 256Mi
+                  cpu: 200m
+          volumes:
+            - name: scan-target
+              emptyDir: {}
+            - name: reports
+              emptyDir: {}

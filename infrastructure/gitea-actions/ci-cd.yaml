@@ -1,0 +1,96 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+env:
+  HARBOR_URL: harbor.local:30002
+  IMAGE_NAME: ${{ gitea.repository }}
+
+jobs:
+  lint-and-test:
+    name: Lint & Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pytest ruff mypy
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Type check
+        run: mypy . --ignore-missing-imports
+
+      - name: Run tests
+        run: pytest -v --tb=short
+
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    needs: lint-and-test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Gitleaks (secret scan)
+        uses: zricethezav/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Trivy vulnerability scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: fs
+          scan-ref: .
+          severity: HIGH,CRITICAL
+          exit-code: 1
+
+  build-and-push:
+    name: Build & Push Image
+    runs-on: ubuntu-latest
+    needs: [lint-and-test, security-scan]
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to Harbor
+        run: |
+          echo "${{ secrets.HARBOR_PASSWORD }}" | docker login ${{ env.HARBOR_URL }} \
+            -u ${{ secrets.HARBOR_USERNAME }} --password-stdin
+
+      - name: Build Docker image
+        run: |
+          docker build -t ${{ env.HARBOR_URL }}/${{ env.IMAGE_NAME }}:${{ gitea.sha }} .
+          docker tag ${{ env.HARBOR_URL }}/${{ env.IMAGE_NAME }}:${{ gitea.sha }} \
+            ${{ env.HARBOR_URL }}/${{ env.IMAGE_NAME }}:latest
+
+      - name: Push to Harbor
+        run: |
+          docker push ${{ env.HARBOR_URL }}/${{ env.IMAGE_NAME }}:${{ gitea.sha }}
+          docker push ${{ env.HARBOR_URL }}/${{ env.IMAGE_NAME }}:latest
+
+  deploy:
+    name: Deploy to Kubernetes
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deploy
+        run: |
+          kubectl set image deployment/${{ gitea.event.repository.name }} \
+            app=${{ env.HARBOR_URL }}/${{ env.IMAGE_NAME }}:${{ gitea.sha }} \
+            -n agents
+          kubectl rollout status deployment/${{ gitea.event.repository.name }} -n agents

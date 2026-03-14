@@ -1,0 +1,42 @@
+monitoringPasscode: "define_it_in_secure_config"
+community:
+  enabled: true
+
+service:
+  type: NodePort
+  externalPort: 9000
+  internalPort: 9000
+  nodePort: 30900
+
+resources:
+  requests:
+    memory: 1Gi
+    cpu: 200m
+  limits:
+    memory: 2Gi
+    cpu: 800m
+
+persistence:
+  enabled: true
+  size: 5Gi
+
+postgresql:
+  enabled: true
+  postgresqlUsername: sonarqube
+  postgresqlPassword: sonarqube
+  postgresqlDatabase: sonarqube
+  resources:
+    requests:
+      memory: 256Mi
+      cpu: 100m
+    limits:
+      memory: 512Mi
+      cpu: 500m
+
+initSysctl:
+  enabled: true
+  vmMaxMapCount: 524288
+  securityContext:
+    privileged: true
+
+jvmOpts: "-Xms512m -Xmx512m"
