@@ -1,93 +1,111 @@
-"""MCP Memory client — wraps the memory server's knowledge graph tools.
+"""Mem0 memory client for agents.
 
-Connects to the mcp-memory service via SSE and exposes:
-  - save_repo_observation(repo, text)   → remember facts about a repo
-  - save_author_observation(author, text) → remember facts about an author
-  - recall(query)                        → retrieve relevant memories
-  - as_tools()                           → returns Anthropic tool defs for Claude
+Agents use Mem0 (mem0.ai) for persistent memory across PR reviews.
+In Claude Code sessions, Mem0 is available as an MCP server.
+In k8s pods, agents call the Mem0 API directly via mem0ai SDK.
+
+Tools exposed to Claude:
+  - memory_save   → add a memory tied to a repo or author
+  - memory_recall → search relevant memories before a review
 """
-import json
 import logging
 import os
-
-import httpx
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
-MCP_MEMORY_URL = os.getenv("MCP_MEMORY_URL", "http://mcp-memory.agents.svc.cluster.local:8080")
+MEM0_API_KEY = os.getenv("MEM0_API_KEY", "")
+MEM0_USER_ID = os.getenv("MEM0_DEFAULT_USER_ID", "hari")
 
 
 # ---------------------------------------------------------------------------
-# Low-level JSON-RPC over HTTP (supergateway exposes the MCP server via HTTP)
+# Direct SDK client (used by agents running in k8s pods)
 # ---------------------------------------------------------------------------
 
-async def _rpc(method: str, params: dict) -> dict:
-    """Call an MCP tool on the memory server."""
-    async with httpx.AsyncClient(timeout=10) as client:
-        r = await client.post(
-            f"{MCP_MEMORY_URL}/mcp",
-            json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params},
+def _get_mem0_client():
+    """Lazy-load the Mem0 client to avoid import errors if key not set."""
+    from mem0 import MemoryClient
+    return MemoryClient(api_key=MEM0_API_KEY)
+
+
+async def save_memory(content: str, user_id: str = MEM0_USER_ID,
+                      metadata: dict[str, Any] | None = None) -> None:
+    """Save a memory to Mem0."""
+    import asyncio
+    try:
+        client = _get_mem0_client()
+        await asyncio.to_thread(
+            client.add,
+            content,
+            user_id=user_id,
+            metadata=metadata or {},
         )
-        r.raise_for_status()
-        data = r.json()
-        if "error" in data:
-            raise RuntimeError(f"MCP error: {data['error']}")
-        return data.get("result", {})
+        logger.info(f"[mem0] saved memory for user={user_id}")
+    except Exception as e:
+        logger.warning(f"[mem0] save failed: {e}")
 
-
-async def _call_tool(name: str, arguments: dict) -> str:
-    result = await _rpc("tools/call", {"name": name, "arguments": arguments})
-    content = result.get("content", [])
-    return " ".join(c.get("text", "") for c in content if c.get("type") == "text")
-
-
-# ---------------------------------------------------------------------------
-# High-level helpers used by agents
-# ---------------------------------------------------------------------------
 
 async def save_repo_observation(repo: str, observation: str) -> None:
-    """Persist a fact about a repository."""
-    try:
-        await _call_tool("create_entities", {
-            "entities": [{"name": repo, "entityType": "repository", "observations": [observation]}]
-        })
-        logger.info(f"[memory] saved repo observation: {repo}")
-    except Exception as e:
-        logger.warning(f"[memory] failed to save repo observation: {e}")
+    await save_memory(
+        f"Repository {repo}: {observation}",
+        metadata={"type": "repository", "repo": repo},
+    )
 
 
 async def save_author_observation(author: str, observation: str) -> None:
-    """Persist a fact about a code author."""
-    try:
-        await _call_tool("create_entities", {
-            "entities": [{"name": author, "entityType": "author", "observations": [observation]}]
-        })
-        logger.info(f"[memory] saved author observation: {author}")
-    except Exception as e:
-        logger.warning(f"[memory] failed to save author observation: {e}")
+    await save_memory(
+        f"Author @{author}: {observation}",
+        metadata={"type": "author", "author": author},
+    )
 
 
-async def recall(query: str) -> str:
-    """Search the knowledge graph and return relevant memories as text."""
+async def recall(query: str, user_id: str = MEM0_USER_ID, limit: int = 5) -> str:
+    """Search Mem0 for relevant memories."""
+    import asyncio
     try:
-        result = await _call_tool("search_nodes", {"query": query})
-        return result or "No relevant memories found."
+        client = _get_mem0_client()
+        results = await asyncio.to_thread(
+            client.search,
+            query,
+            user_id=user_id,
+            limit=limit,
+        )
+        if not results:
+            return "No relevant memories found."
+        lines = [f"- {r['memory']}" for r in results]
+        return "\n".join(lines)
     except Exception as e:
-        logger.warning(f"[memory] recall failed: {e}")
+        logger.warning(f"[mem0] recall failed: {e}")
         return "Memory unavailable."
 
 
 # ---------------------------------------------------------------------------
-# Anthropic tool definitions — pass these into Claude so it can use memory
+# Anthropic tool definitions — Claude calls these natively via tool_use
 # ---------------------------------------------------------------------------
 
 MEMORY_TOOLS: list[dict] = [
     {
+        "name": "memory_recall",
+        "description": (
+            "Search past memories about a repository or author from previous PR reviews. "
+            "Call this at the START of every review to retrieve relevant context."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "What to search for — repo name, author username, or topic"
+                }
+            },
+            "required": ["query"],
+        },
+    },
+    {
         "name": "memory_save",
         "description": (
-            "Save a persistent observation about a repository or code author. "
-            "Use after completing a review to remember patterns, preferences, or issues "
-            "that will be relevant for future reviews."
+            "Save a persistent observation about a repository or author. "
+            "Call this AFTER completing a review to remember patterns for next time."
         ),
         "input_schema": {
             "type": "object",
@@ -99,46 +117,28 @@ MEMORY_TOOLS: list[dict] = [
                 "entity_type": {
                     "type": "string",
                     "enum": ["repository", "author"],
-                    "description": "Whether this is about a repo or a person"
                 },
                 "observation": {
                     "type": "string",
-                    "description": "Concise factual observation to remember"
-                }
+                    "description": "Concise factual observation to remember for future reviews"
+                },
             },
-            "required": ["entity_name", "entity_type", "observation"]
-        }
+            "required": ["entity_name", "entity_type", "observation"],
+        },
     },
-    {
-        "name": "memory_recall",
-        "description": (
-            "Search past observations about repositories and authors. "
-            "Call this at the start of a review to retrieve relevant context "
-            "from previous reviews."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "query": {
-                    "type": "string",
-                    "description": "What to search for, e.g. repo name, author, or topic"
-                }
-            },
-            "required": ["query"]
-        }
-    }
 ]
 
 
 async def handle_tool_call(tool_name: str, tool_input: dict) -> str:
-    """Dispatch a tool call from Claude to the MCP memory server."""
+    """Dispatch a memory tool call from Claude to Mem0."""
+    if tool_name == "memory_recall":
+        return await recall(tool_input["query"])
+
     if tool_name == "memory_save":
-        entity_type = tool_input["entity_type"]
-        if entity_type == "repository":
+        if tool_input["entity_type"] == "repository":
             await save_repo_observation(tool_input["entity_name"], tool_input["observation"])
         else:
             await save_author_observation(tool_input["entity_name"], tool_input["observation"])
-        return "Observation saved."
-    elif tool_name == "memory_recall":
-        return await recall(tool_input["query"])
+        return "Memory saved."
+
     return f"Unknown tool: {tool_name}"

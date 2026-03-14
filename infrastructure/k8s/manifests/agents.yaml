@@ -6,7 +6,6 @@ metadata:
   name: agent-config
   namespace: agents
 data:
-  GITEA_URL: "http://gitea.tools.svc.cluster.local:3000"
   ANTHROPIC_MODEL: "claude-sonnet-4-6"
 
 ---
@@ -18,7 +17,11 @@ metadata:
 type: Opaque
 stringData:
   ANTHROPIC_API_KEY: "REPLACE_WITH_YOUR_KEY"
-  GITEA_TOKEN: "REPLACE_WITH_GITEA_TOKEN"
+  GITHUB_TOKEN: "REPLACE_WITH_GITHUB_TOKEN"
+  GITHUB_WEBHOOK_SECRET: "REPLACE_WITH_WEBHOOK_SECRET"
+  MEM0_API_KEY: "REPLACE_WITH_MEM0_API_KEY"
+  MEM0_DEFAULT_USER_ID: "hari"
+  SLACK_WEBHOOK_URL: "REPLACE_WITH_SLACK_WEBHOOK_URL"
 
 ---
 apiVersion: apps/v1
