@@ -1,0 +1,83 @@
+# MCP Memory Server — persistent knowledge graph for agents
+# Uses @modelcontextprotocol/server-memory exposed via supergateway (stdio → SSE/HTTP)
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mcp-memory-pvc
+  namespace: agents
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 1Gi
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcp-memory
+  namespace: agents
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mcp-memory
+  template:
+    metadata:
+      labels:
+        app: mcp-memory
+    spec:
+      containers:
+        - name: mcp-memory
+          image: node:20-alpine
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              npx -y supergateway \
+                --port 8080 \
+                --stdio "npx -y @modelcontextprotocol/server-memory"
+          env:
+            - name: MEMORY_FILE_PATH
+              value: /data/memory.json
+          ports:
+            - containerPort: 8080
+          volumeMounts:
+            - name: memory-data
+              mountPath: /data
+          resources:
+            requests:
+              memory: 128Mi
+              cpu: 100m
+            limits:
+              memory: 256Mi
+              cpu: 250m
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 8080
+            initialDelaySeconds: 20
+            periodSeconds: 10
+      volumes:
+        - name: memory-data
+          persistentVolumeClaim:
+            claimName: mcp-memory-pvc
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp-memory
+  namespace: agents
+spec:
+  selector:
+    app: mcp-memory
+  ports:
+    - port: 8080
+      targetPort: 8080
